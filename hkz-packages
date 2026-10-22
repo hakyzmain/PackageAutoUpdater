@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")")" && pwd)"
+VERSION="$(cat "${SCRIPT_DIR}/VERSION" 2>/dev/null || echo "0.0.0")"
+OS=""
+
+c_ok() { printf '\033[0;32m[OK]\033[0m %s\n' "$*"; }
+c_err() { printf '\033[0;31m[ERR]\033[0m %s\n' "$*"; }
+c_step() { printf '\033[0;34m[>>]\033[0m %s\n' "$*"; }
+
+die() { c_err "$*"; exit 1; }
+need_root() { [[ $EUID -eq 0 ]] || die "root required"; }
+
+detect_os() {
+  [ -f /etc/os-release ] || die "unsupported OS"
+  . /etc/os-release
+  case "${ID:-}" in
+    ubuntu) OS=ubuntu ;;
+    debian) OS=debian ;;
+    rocky) OS=rocky ;;
+    almalinux) OS=almalinux ;;
+    centos) OS=centos ;;
+    fedora) OS=fedora ;;
+    *) die "unsupported OS: ${ID:-?}" ;;
+  esac
+  export OS
+}
+
+stop_unattended() {
+  systemctl stop unattended-upgrades 2>/dev/null || true
+  systemctl stop apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
+  systemctl kill --kill-who=all apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
+}
+
+apt_get() {
+  DEBIAN_FRONTEND=noninteractive apt-get -y \
+    -o Dpkg::Options::="--force-confdef" \
+    -o Dpkg::Options::="--force-confold" \
+    "$@"
+}
+
+cmd_update() {
+  need_root
+  detect_os
+  c_step "system packages update (v${VERSION})"
+  case "$OS" in
+    ubuntu|debian)
+      stop_unattended
+      export DEBIAN_FRONTEND=noninteractive
+      apt_get update
+      apt_get upgrade
+      apt_get dist-upgrade
+      apt_get autoremove --purge
+      apt_get autoclean
+      ;;
+    rocky|almalinux|centos|fedora)
+      if command -v dnf >/dev/null 2>&1; then
+        dnf -y makecache
+        dnf -y upgrade --refresh
+        dnf -y autoremove
+      else
+        yum -y makecache
+        yum -y update
+      fi
+      ;;
+  esac
+  c_ok "packages updated"
+}
+
+cmd_check() {
+  need_root
+  detect_os
+  c_step "check updates"
+  case "$OS" in
+    ubuntu|debian)
+      apt_get update
+      apt list --upgradable 2>/dev/null | sed '1d' || true
+      ;;
+    rocky|almalinux|centos|fedora)
+      if command -v dnf >/dev/null 2>&1; then
+        dnf -y makecache >/dev/null
+        dnf check-update || true
+      else
+        yum check-update || true
+      fi
+      ;;
+  esac
+}
+
+cmd_self_update() {
+  need_root
+  bash "${SCRIPT_DIR}/install.sh"
+}
+
+cmd_version() {
+  echo "hkz-packages ${VERSION}"
+}
+
+cmd_help() {
+  cat <<EOF
+hkz-packages ${VERSION}
+
+  hkz-packages update        update all system packages
+  hkz-packages check         list available updates
+  hkz-packages self-update   pull latest from GitHub
+  hkz-packages version
+  hkz-packages help
+EOF
+}
+
+main() {
+  local cmd="${1:-update}"
+  shift || true
+  case "$cmd" in
+    update|up|upgrade) cmd_update "$@" ;;
+    check|list) cmd_check "$@" ;;
+    self-update|selfupdate) cmd_self_update "$@" ;;
+    version|-v|--version) cmd_version "$@" ;;
+    help|-h|--help) cmd_help "$@" ;;
+    *) c_err "unknown: $cmd"; cmd_help; exit 1 ;;
+  esac
+}
+
+main "$@"
